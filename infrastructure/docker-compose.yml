@@ -1,6 +1,9 @@
 version: "3.8"
 
 services:
+
+  # ─── Infrastructure ───────────────────────────────────────────────
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
@@ -14,6 +17,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - kafka-network
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -38,6 +43,8 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+    networks:
+      - kafka-network
 
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
@@ -48,14 +55,16 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command: |
       "
-      echo 'Creating Kafka topics...'
+      echo '>>> Creating Kafka topics...'
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic orders --partitions 3 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic payment-success --partitions 3 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic inventory-updated --partitions 3 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic notifications --partitions 3 --replication-factor 1
-      echo 'Topics created:'
+      echo '>>> Topics created:'
       kafka-topics --bootstrap-server kafka:29092 --list
       "
+    networks:
+      - kafka-network
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -69,3 +78,155 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - kafka-network
+
+  # ─── Databases ────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: inventory_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kafka-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/var/lib/redis/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kafka-network
+
+  # ─── Application Services ────────────────────────────────────────
+
+  order-service:
+    build:
+      context: ../services/order-service
+      dockerfile: Dockerfile
+    container_name: order-service
+    ports:
+      - "8001:8001"
+    environment:
+      KAFKA_BROKER: kafka:29092
+      REDIS_HOST: redis
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - kafka-network
+
+  payment-service:
+    build:
+      context: ../services/payment-service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    environment:
+      KAFKA_BROKER: kafka:29092
+      REDIS_HOST: redis
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - kafka-network
+
+  inventory-service:
+    build:
+      context: ../services/inventory-service
+      dockerfile: Dockerfile
+    container_name: inventory-service
+    environment:
+      KAFKA_BROKER: kafka:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: inventory_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - kafka-network
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    container_name: notification-service
+    environment:
+      KAFKA_BROKER: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - kafka-network
+
+  # ─── Monitoring ──────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    networks:
+      - kafka-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - kafka-network
+
+# ─── Networks & Volumes ──────────────────────────────────────────
+
+networks:
+  kafka-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

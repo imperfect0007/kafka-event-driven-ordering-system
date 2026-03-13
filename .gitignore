@@ -1,6 +1,13 @@
 node_modules/
+__pycache__/
+*.pyc
 .env
 *.log
 dist/
 .DS_Store
 Thumbs.db
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
